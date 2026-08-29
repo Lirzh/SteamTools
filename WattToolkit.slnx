@@ -163,12 +163,6 @@
   <Folder Name="/5.Plugins/">
     <Project Path="src/BD.WTTS.Client.Plugins.Accelerator.ReverseProxy/BD.WTTS.Client.Plugins.Accelerator.ReverseProxy.csproj" />
     <Project Path="src/BD.WTTS.Client.Plugins.Accelerator/BD.WTTS.Client.Plugins.Accelerator.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.ArchiSteamFarmPlus/BD.WTTS.Client.Plugins.ArchiSteamFarmPlus.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.Authenticator/BD.WTTS.Client.Plugins.Authenticator.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.GameAccount/BD.WTTS.Client.Plugins.GameAccount.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.GameList/BD.WTTS.Client.Plugins.GameList.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.GameTools/BD.WTTS.Client.Plugins.GameTools.csproj" />
-    <Project Path="src/BD.WTTS.Client.Plugins.SteamIdleCard/BD.WTTS.Client.Plugins.SteamIdleCard.csproj" />
   </Folder>
   <Folder Name="/6.Tools/">
     <Project Path="ref/Common/src/BD.Common.Settings.V4.SourceGenerator.Tools/BD.Common.Settings.V4.SourceGenerator.Tools.csproj" />
