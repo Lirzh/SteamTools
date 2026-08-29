@@ -1178,15 +1178,6 @@ publish -c {0} -p:OutputType={1} -p:PublishDir=bin\{0}\Publish\win-any -p:Publis
     static IEnumerable<string> GetPluginNames(Platform platform)
     {
         yield return AssemblyInfo.Accelerator;
-        yield return AssemblyInfo.GameAccount;
-        yield return AssemblyInfo.GameList;
-        yield return AssemblyInfo.Authenticator;
-        yield return AssemblyInfo.SteamIdleCard;
-        if (platform == Platform.Windows)
-        {
-            yield return AssemblyInfo.ArchiSteamFarmPlus;
-            yield return AssemblyInfo.GameTools;
-        }
     }
 
     /// <summary>

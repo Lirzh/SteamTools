@@ -233,12 +233,6 @@ public static class PluginsCore
         {
             var modules = loadModules.Any_Nullable() ? loadModules : new[] {
                 Accelerator,
-                GameAccount,
-                GameList,
-                ArchiSteamFarmPlus,
-                Authenticator,
-                GameTools,
-                SteamIdleCard,
             };
             foreach (var item in modules)
             {

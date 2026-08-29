@@ -49,24 +49,6 @@ elif [ "$Build_Mode" = "x64" ]; then
     Copy_Plugins "$Publish_Path/x64" "Accelerator" "Steam++.Accelerator"
 fi
 
-echo "编译令牌插件"
-Plugins_Authenticator_Path="$Base_Path/src/BD.WTTS.Client.Plugins.Authenticator"
-cd "$Plugins_Authenticator_Path"
-dotnet publish -c Release -p:PublishDir="$Publish_Path" -f net8.0-macos -p:EnableCodeSigning=true -p:CodesignKey="$CodesignKey_Name"
-Copy_Plugins "$Plugins_Release_Path/net8.0-macos" "Authenticator" "BD.WTTS.Client.Plugins.Authenticator.dll"
-
-echo "编译账户插件"
-Plugins_GameAccount_Path="$Base_Path/src/BD.WTTS.Client.Plugins.GameAccount"
-cd "$Plugins_GameAccount_Path"
-dotnet publish -c Release -p:PublishDir="$Publish_Path" -f net8.0-macos -p:EnableCodeSigning=true -p:CodesignKey="$CodesignKey_Name"
-Copy_Plugins "$Plugins_Release_Path/net8.0-macos" "GameAccount" "BD.WTTS.Client.Plugins.GameAccount.dll"
-
-echo "编译游戏库插件"
-Plugins_GameList_Path="$Base_Path/src/BD.WTTS.Client.Plugins.GameList"
-cd "$Plugins_GameList_Path"
-dotnet publish -c Release -p:PublishDir="$Publish_Path" -f net8.0-macos -p:EnableCodeSigning=true -p:CodesignKey="$CodesignKey_Name"
-Copy_Plugins "$Plugins_Release_Path/net8.0-macos" "GameList" "BD.WTTS.Client.Plugins.GameList.dll"
-
 echo "复制插件到程序目录"
 cd "$App_Path"
 
