@@ -1,382 +1,127 @@
 name: Publish
 
 env:
-  ProjectName: Steam++
-  Configuration: Release
-  PublishFilePath: C:\PublishFiles
+  DotNetVersion: '11.0.x'
+  AvaloniaAppDir: src/BD.WTTS.Client.Avalonia.App
+  PublishToolDir: src/BD.WTTS.Client.Tools.Publish
+  ReleaseName: Steam++ Linux amd64 (latest)
+  ReleaseTag: linux-latest
 
 on:
-  push:
-    tags:
-      - '*'
+  # 仅支持手动触发
+  workflow_dispatch:
 
 jobs:
-  Publish:
-    name: Publish
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ windows-latest ]
+  publish-linux-x64:
+    name: Build & Publish Linux amd64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
         submodules: recursive
 
-    - name: Setup .NET 6
-      uses: actions/setup-dotnet@v3
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 6.0.x
+        dotnet-version: ${{ env.DotNetVersion }}
 
-    - name: Install macOS SDK(macOS)
-      if: matrix.os == 'macOS-latest'
-      run: sudo dotnet workload install macos
-      
-    - name: Install macOS SDK(Windows)
-      if: matrix.os == 'windows-latest'
-      run: dotnet workload install macos
-
-    - name: Install Android SDK(Unix)
-      if: ${{ matrix.os == 'macOS-latest' || matrix.os == 'ubuntu-latest' }}
-      run: sudo dotnet workload install android
-      
-    - name: Install Android SDK(Windows)
-      if: matrix.os == 'windows-latest'
-      run: dotnet workload install android
-
-    - name: Install Maui(Windows)
-      if: matrix.os == 'windows-latest'
-      run: dotnet workload install maui
-
-    - name: Install Maui(Unix)
-#      if: ${{ matrix.os == 'macOS-latest' || matrix.os == 'ubuntu-latest' }}
-      if: matrix.os == 'macOS-latest'
-      run: sudo dotnet workload install maui
-
-    - name: Verify dotnet info
-      run: dotnet --info
-
-    - name: Shell Version
-      run: sh --version
-      
-    - name: Checkout NSIS-Build repository
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      uses: actions/checkout@v3
-      with:
-        repository: SteamTools-Team/NSIS-Build
-        token: ${{ secrets.REPO_TOKEN }}
-        path: ./NSIS-Build
-
-    - name: Checkout Credentials repository
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      uses: actions/checkout@v3
-      with:
-        repository: SteamTools-Team/Credentials
-        token: ${{ secrets.REPO_TOKEN }}
-        path: ./Credentials
-
-    - name: Copy pfx and snk To Source
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    - name: Stage .NET runtime (linux-x64)
+      shell: bash
       run: |
-        copy ".\Credentials\*.pfx" .
-        copy ".\Credentials\*.snk" .
-        dir *.pfx -s
+        set -e
+        # 发布工具的 Linux 分支会把该目录下的运行时复制进发布产物
+        runtime_dir="${{ env.AvaloniaAppDir }}/bin/Release/Publish/dotnet-Runtime/Linux-X64"
+        mkdir -p "$runtime_dir"
+        # 使用与当前 SDK 一致的运行时版本，避免发布产物运行时补丁版本不一致
+        runtime_version="$(dotnet --list-runtimes | grep 'Microsoft.AspNetCore.App' | awk '{print $2}' | head -n1)"
+        if [ -z "$runtime_version" ]; then
+          echo "未检测到 Microsoft.AspNetCore.App 运行时版本" >&2
+          exit 1
+        fi
+        echo "下载 aspnetcore 运行时: $runtime_version (linux-x64)"
+        dotnet-install_dir="$(mktemp -d)"
+        curl -sSL https://dot.net/v1/dotnet-install.sh -o "$dotnet-install_dir/dotnet-install.sh"
+        chmod +x "$dotnet-install_dir/dotnet-install.sh"
+        "$dotnet-install_dir/dotnet-install.sh" --runtime aspnetcore --version "$runtime_version" --install-dir "$runtime_dir" --no-path
 
-    - name: dotnet restore SteamToolsV2+.sln
-      if: matrix.os == 'windows-latest'
-      run: dotnet restore ./SteamToolsV2+.sln
-      
-    - name: dotnet restore SteamToolsV2+.Linux.sln
-      if: matrix.os == 'ubuntu-latest'
-      run: dotnet restore ./SteamToolsV2+.Linux.slnf
-      
-    - name: dotnet restore SteamToolsV2+.Mac.sln
-      if: matrix.os == 'macOS-latest'
-      run: dotnet restore ./SteamToolsV2+.Mac.slnf
-      
-    - name: Build AvaloniaApp
-      run: dotnet build ./src/ST.Client.Desktop.Avalonia.App/ST.Client.Avalonia.App.csproj -c "${{ env.Configuration }}"
-     
-    - name: Run CommonUnit
-      run: dotnet test ./tests/Common.UnitTest/Common.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Run ST.Client.UnitTest
-      run: dotnet test ./tests/ST.Client.UnitTest/ST.Client.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Run ST.Client.Desktop.UnitTest
-      run: dotnet test ./tests/ST.Client.Desktop.UnitTest/ST.Client.Desktop.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Get tag
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      id: tag
-      uses: dawidd6/action-get-tag@v1
-
-    - name: Build ST.Tools.Publish Release
-      run: dotnet build ./src/ST.Tools.Publish/ST.Tools.Publish.csproj -c Release
-
-    - name: Build Release & Package All & Publish Server
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: .\packaging\build.ps1 -version ${{ steps.tag.outputs.tag }} -configuration ${{ env.Configuration }} -isPublish $true
-      env: 
-        Token: ${{ secrets.PUBLISH_TOKEN }}
-        WIN_SIGN_PFX_PWD: ${{ secrets.WIN_SIGN_PFX_PWD }}
-
-    - name: Package fd-win-x64 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
+    - name: Stage Linux launcher scripts (ShellScript/Linux)
+      shell: bash
       run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x64_fde_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "fd_win_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x64_fde_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        set -e
+        # 发布工具会将该目录下的脚本拷贝进发布目录并生成 Steam++.sh 启动脚本
+        script_dir="${{ env.AvaloniaAppDir }}/bin/Release/Publish/ShellScript/Linux"
+        mkdir -p "$script_dir"
+        cat > "$script_dir/Steam++.sh" <<'EOF'
+        #!/bin/sh
+        # Steam++ Linux 启动脚本（CI 内置占位脚本，请按需替换为正式版本）
+        exec "$(dirname "$0")/dotnet/dotnet" "$(dirname "$0")/Steam++.dll" "$@"
+        EOF
+        chmod +x "$script_dir/Steam++.sh"
 
-    - name: Package fd-win-x64 exe
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
+    - name: Build & Pack Linux amd64 (linux-x64)
+      shell: bash
       run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x64_fde_v${{ steps.tag.outputs.tag }}.exe" "${env:PublishFilePath}"
-        Write-Output "exe_fd_win_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x64_fde_v${{ steps.tag.outputs.tag }}.exe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        dotnet run --project "${{ env.PublishToolDir }}/BD.WTTS.Client.Tools.Publish.csproj" -c Release -- run --rids linux-x64
 
-    - name: Package win-x64 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
+    - name: Collect artifacts
+      id: artifacts
+      shell: bash
       run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x64_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "win_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x64_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-    
-    - name: Package win-x64 exe
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x64_v${{ steps.tag.outputs.tag }}.exe" "${env:PublishFilePath}"
-        Write-Output "exe_win_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x64_v${{ steps.tag.outputs.tag }}.exe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        set -e
+        publish_root="${{ env.AvaloniaAppDir }}/bin/Release/Publish"
+        release_dir="$RUNNER_TEMP/release"
+        mkdir -p "$release_dir"
+        tar_file="$(ls "$publish_root"/*linux_x64*.tar.gz 2>/dev/null | head -n1)"
+        json_file="$(ls "$publish_root"/*linux_x64*.json 2>/dev/null | head -n1)"
+        if [ -z "$tar_file" ]; then
+          echo "未找到 linux_x64 tar.gz 产出物" >&2
+          exit 1
+        fi
+        cp "$tar_file" "$release_dir/Steam++_linux_x64.tar.gz"
+        if [ -n "$json_file" ]; then
+          cp "$json_file" "$release_dir/Steam++_linux_x64.json"
+        fi
+        echo "ARTIFACTS_DIR=$release_dir" >> "$GITHUB_ENV"
 
-    - name: Package fd-win-x86 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x86_fde_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "fd_win_x86_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x86_fde_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package fd-win-x86 exe
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x86_fde_v${{ steps.tag.outputs.tag }}.exe" "${env:PublishFilePath}"
-        Write-Output "exe_fd_win_x86_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x86_fde_v${{ steps.tag.outputs.tag }}.exe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package win-x86 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x86_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "win_x86_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x86_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-    
-    - name: Package win-x86 exe
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_win_x86_v${{ steps.tag.outputs.tag }}.exe" "${env:PublishFilePath}"
-        Write-Output "exe_win_x86_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_win_x86_v${{ steps.tag.outputs.tag }}.exe)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package osx-x64 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_macos_x64_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "macos_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_macos_x64_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package osx-arm64 7z
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_macos_arm64_v${{ steps.tag.outputs.tag }}.7z" "${env:PublishFilePath}"
-        Write-Output "macos_arm64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_macos_arm64_v${{ steps.tag.outputs.tag }}.7z)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package linux-x64 tar.zst
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.tar.zst" "${env:PublishFilePath}"
-        Write-Output "linux_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.tar.zst)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-                
-    - name: Package linux-arm64 tar.zst
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.tar.zst" "${env:PublishFilePath}"
-        Write-Output "linux_arm64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.tar.zst)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        
-    - name: Package linux-x64 deb
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.deb" "${env:PublishFilePath}"
-        Write-Output "deb_linux_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.deb)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package linux-arm64 deb
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.deb" "${env:PublishFilePath}"
-        Write-Output "deb_linux_arm64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.deb)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package linux-x64 rpm
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.rpm" "${env:PublishFilePath}"
-        Write-Output "rpm_linux_x64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_x64_v${{ steps.tag.outputs.tag }}.rpm)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-    - name: Package linux-arm64 rpm
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      shell: pwsh
-      run: |
-        New-Item -ItemType Directory -Path ${env:PublishFilePath} -Force > $null
-        Copy-Item ".\src\ST.Client.Desktop.Avalonia.App\bin\${env:Configuration}\Publish\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.rpm" "${env:PublishFilePath}"
-        Write-Output "rpm_linux_arm64_SHA256=$(.\packaging\SHA256.ps1 ${env:PublishFilePath}\${env:ProjectName}_linux_arm64_v${{ steps.tag.outputs.tag }}.rpm)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-        
-    - name: Changelog
-      uses: glennawatson/ChangeLog@v1
+    - name: Get commit log
       id: changelog
+      shell: bash
+      run: |
+        last_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
+        if [ -n "$last_tag" ]; then
+          commit_log="$(git log --oneline --no-merges "$last_tag"..HEAD | head -n 40)"
+        else
+          commit_log="$(git log --oneline --no-merges -20)"
+        fi
+        {
+          echo "COMMIT_LOG<<CHANGELOG_EOF"
+          echo "$commit_log"
+          echo "CHANGELOG_EOF"
+        } >> "$GITHUB_ENV"
 
-    - name: Create a new GitHub release
+    - name: Publish to latest Release
       uses: ncipollo/release-action@v1
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        name: ${{ steps.tag.outputs.tag }}
-        prerelease: false
-        draft: true
-        artifacts: ${{ env.PublishFilePath }}\*
+        tag: ${{ env.ReleaseTag }}
+        name: ${{ env.ReleaseName }}
+        commit: ${{ github.sha }}
+        artifacts: ${{ env.ARTIFACTS_DIR }}/*
+        allowUpdates: true
+        replacesArtifacts: true
+        makeLatest: true
         body: |
-          ## 版本亮点
-          * 此版本由 GitHub Action 自动化部署发布，更新日志会在一段时间后手动更新。
+          ## Steam++ Linux amd64 最新构建
+          * 由 GitHub Action 手动触发构建并自动更新到此 Latest Release。
 
+          ## 更新日志
+          ${{ env.COMMIT_LOG }}
 
-          ${{ steps.changelog.outputs.commitLog }}
-          
-          
-          ## 文件校验
-          |  File  | Checksum (SHA256)  |
-          | :- | :- |
-          | <sub>${{ env.ProjectName }}_win_x64_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.win_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x64_fde_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.fd_win_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x64_v${{ steps.tag.outputs.tag }}.exe</sub> | <sub>${{ env.exe_win_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x64_fde_v${{ steps.tag.outputs.tag }}.exe</sub> | <sub>${{ env.exe_fd_win_x64_SHA256 }}</sub> |
-          |||
-          | <sub>${{ env.ProjectName }}_win_x86_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.win_x86_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x86_fde_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.fd_win_x86_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x86_v${{ steps.tag.outputs.tag }}.exe</sub> | <sub>${{ env.exe_win_x86_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_win_x86_fde_v${{ steps.tag.outputs.tag }}.exe</sub> | <sub>${{ env.exe_fd_win_x86_SHA256 }}</sub> |
-          |||
-          | <sub>${{ env.ProjectName }}_linux_x64_v${{ steps.tag.outputs.tag }}.tar.zst</sub> | <sub>${{ env.linux_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_linux_arm64_v${{ steps.tag.outputs.tag }}.tar.zst</sub> | <sub>${{ env.linux_arm64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_linux_x64_v${{ steps.tag.outputs.tag }}.deb</sub> | <sub>${{ env.deb_linux_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_linux_arm64_v${{ steps.tag.outputs.tag }}.deb</sub> | <sub>${{ env.deb_linux_arm64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_linux_x64_v${{ steps.tag.outputs.tag }}.rpm</sub> | <sub>${{ env.rpm_linux_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_linux_arm64_v${{ steps.tag.outputs.tag }}.rpm</sub> | <sub>${{ env.rpm_linux_arm64_SHA256 }}</sub> |
-          |||
-          | <sub>${{ env.ProjectName }}_macos_x64_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.macos_x64_SHA256 }}</sub> |
-          | <sub>${{ env.ProjectName }}_macos_arm64_v${{ steps.tag.outputs.tag }}.7z</sub> | <sub>${{ env.macos_arm64_SHA256 }}</sub> |
-            
-            
-          [![WebSite steampp.net](https://img.shields.io/badge/WebSite-steampp.net-brightgreen.svg?style=flat-square&color=61dafb)](https://steampp.net)
-          [![${{ env.ProjectName }} v${{ steps.tag.outputs.tag }}](https://img.shields.io/badge/${{ env.ProjectName }}-v${{ steps.tag.outputs.tag }}-brightgreen.svg?style=flat-square&color=512bd4)]()
-
-          ##### [不知道该下载哪个文件?](https://github.com/BeyondDimension/SteamTools/blob/develop/download-guide.md)
-
-  WindowsStore:
-    name: WindowsStore Publish
-    runs-on: ${{ matrix.os }}
-    if: ${{ false }} #未做完暂时禁用
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ windows-latest ]
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-        submodules: recursive
-    
-    - name: Setup .NET 6
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: 6.0.x
-
-    - name: Add msbuild to PATH
-      if: matrix.os == 'windows-latest'
-      uses: microsoft/setup-msbuild@v1.3
-
-    - name: Verify dotnet info
-      run: |
-        dotnet --info
-        msbuild --version
-
-    - name: dotnet restore SteamToolsV2+.sln
-      if: matrix.os == 'windows-latest'
-      run: dotnet restore ./SteamToolsV2+.sln
-      
-    - name: dotnet restore SteamToolsV2+.Linux.sln
-      if: matrix.os == 'ubuntu-latest'
-      run: dotnet restore ./SteamToolsV2+.Linux.slnf
-      
-    - name: dotnet restore SteamToolsV2+.Mac.sln
-      if: matrix.os == 'macOS-latest'
-      run: dotnet restore ./SteamToolsV2+.Mac.slnf
-      
-    - name: Build AvaloniaApp
-      run: dotnet build ./src/ST.Client.Desktop.Avalonia.App/ST.Client.Avalonia.App.csproj -c "${{ env.Configuration }}"
-     
-    - name: Run CommonUnit
-      run: dotnet test ./tests/Common.UnitTest/Common.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Run ST.Client.UnitTest
-      run: dotnet test ./tests/ST.Client.UnitTest/ST.Client.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Run ST.Client.Desktop.UnitTest
-      run: dotnet test ./tests/ST.Client.Desktop.UnitTest/ST.Client.Desktop.UnitTest.csproj -c "${{ env.Configuration }}"
-
-    - name: Get tag
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      id: tag
-      uses: dawidd6/action-get-tag@v1
-
-    - name: Checkout Credentials repository
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      uses: actions/checkout@v3
-      with:
-        repository: SteamTools-Team/Credentials
-        token: ${{ secrets.REPO_TOKEN }}
-        path: ./Credentials
-
-    - name: Copy pfx and snk To Source
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-      run: |
-        copy ".\Credentials\*.pfx" .
-        copy ".\Credentials\*.snk" .
-        dir *.pfx -s
-
-    #- name: Build MSIX Package
-    #  run: msbuild .\src\ST.Client.Desktop.Avalonia.App.Bridge.Package\ST.Client.Avalonia.App.Bridge.Package.wapproj /t:rebuild /p:Platform=x64 /p:AppxBundlePlatforms="x64" /p:AppxBundle=Always /p:configuration="release" /t:Publish /p:UapAppxPackageBuildMode=StoreUpload
+          ## 文件
+          - Steam++_linux_x64.tar.gz：Linux amd64 压缩包
+          - Steam++_linux_x64.json：发布文件清单
