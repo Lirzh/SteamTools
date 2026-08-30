@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Steam++ 网络加速</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #0f1115; color: #e6e8ec; height: 100vh; display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; gap: 14px; padding: 16px 22px;
+      border-bottom: 1px solid #23262e; background: #16181f;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #3a3f4a; }
+    .dot.running { background: #35e07a; box-shadow: 0 0 8px #35e07a; }
+    .status-txt { font-size: 13px; color: #9aa1ac; margin-left: auto; }
+    .bar { display: flex; align-items: center; gap: 12px; }
+    .btn {
+      border: 0; border-radius: 8px; padding: 9px 18px; font-size: 14px; cursor: pointer;
+      background: #2b6cff; color: #fff; transition: filter .15s;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:disabled { filter: grayscale(.5); cursor: not-allowed; }
+    .btn.secondary { background: #2a2f3a; }
+    .btn.danger { background: #d6354a; }
+    main { flex: 1; overflow-y: auto; padding: 20px 22px; }
+    .card { background: #16181f; border: 1px solid #23262e; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+    .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    .host-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+    .host-item {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px;
+      background: #1c1f27; border: 1px solid #262b35; cursor: pointer; font-size: 13px;
+    }
+    .host-item.off { opacity: .5; }
+    .host-item input { accent-color: #2b6cff; width: 15px; height: 15px; }
+    .hint { font-size: 12px; color: #7f8691; line-height: 1.7; }
+    .row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .row label { width: 90px; color: #9aa1ac; font-size: 13px; }
+    .row input { flex: 1; max-width: 220px; background: #1c1f27; border: 1px solid #2a2f3a; color: #e6e8ec; border-radius: 8px; padding: 8px 10px; }
+    #log { font-family: ui-monospace, monospace; font-size: 12px; color: #35e07a; background: #0c0e12; border: 1px solid #23262e; border-radius: 8px; padding: 10px; height: 120px; overflow-y: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="dot" id="statusDot"></div>
+    <h1>Steam++ 网络加速</h1>
+    <div class="bar">
+      <span class="status-txt" id="statusTxt">未运行</span>
+      <button class="btn" id="btnToggle">开始加速</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>证书</h2>
+      <div class="row">
+        <button class="btn secondary" id="btnExportCa">导出根证书</button>
+        <span class="hint" style="flex:1">需要先在系统里信任“Steam++ Accelerator Root CA”，HTTPS 加速才会生效。点导出保存该 CA（Linux 可双击安装到“授权证书”）。</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>加速域名（勾选即可被拦截加速）</h2>
+      <div class="host-grid" id="hostList"></div>
+    </div>
+
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="row"><label>监听端口</label><input id="portInput" value="10666" /></div>
+      <div class="hint">把系统/应用的 HTTP(S) 代理指向 <b>127.0.0.1:端口</b> 即可生效；勾选的域名会做 HTTPS 解密加速，未勾选域名透明直连。</div>
+    </div>
+
+    <div class="card">
+      <h2>日志</h2>
+      <div id="log"></div>
+    </div>
+  </main>
+
+  <script>
+    const invoke = window.__TAURI__.core.invoke;
+    const $ = (id) => document.getElementById(id);
+    const log = (m) => { $('log').textContent += m + '\n'; $('log').scrollTop = $('log').scrollHeight; };
+
+    let currentHosts = [];
+    let running = false;
+
+    function renderHosts() {
+      const box = $('hostList');
+      box.innerHTML = '';
+      currentHosts.forEach((h) => {
+        const item = document.createElement('label');
+        item.className = 'host-item';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        cb.onchange = () => saveHosts();
+        const span = document.createElement('span');
+        span.textContent = h;
+        item.appendChild(cb); item.appendChild(span);
+        box.appendChild(item);
+      });
+    }
+
+    async function refresh() {
+      const s = await invoke('status');
+      running = s.running;
+      currentHosts = s.hosts;
+      $('portInput').value = s.port;
+      $('statusDot').className = 'dot' + (running ? ' running' : '');
+      $('statusTxt').textContent = running ? '运行中 @ 127.0.0.1:' + s.port : '未运行';
+      $('btnToggle').textContent = running ? '停止加速' : '开始加速';
+      $('btnToggle').className = 'btn ' + (running ? 'danger' : '');
+      renderHosts();
+    }
+
+    async function saveHosts() {
+      const checked = [];
+      document.querySelectorAll('.host-item input:checked').forEach((cb) => {
+        checked.push(cb.nextElementSibling.textContent);
+      });
+      await invoke('set_hosts', { hosts: checked });
+      log('已更新加速域名清单');
+    }
+
+    $('btnToggle').onclick = async () => {
+      try {
+        if (running) { await invoke('stop_proxy'); log('已停止'); }
+        else { await invoke('start_proxy'); log('已启动，代理地址 127.0.0.1:' + $('portInput').value); }
+        await refresh();
+      } catch (e) { log('操作失败: ' + e); }
+    };
+
+    $('btnExportCa').onclick = async () => {
+      try { const p = await invoke('export_ca'); log('根证书已导出: ' + p); }
+      catch (e) { log('导出失败: ' + e); }
+    };
+
+    refresh().catch((e) => log('初始化失败: ' + e));
+    setInterval(() => refresh().catch(() => {}), 3000);
+  </script>
+</body>
+</html>
