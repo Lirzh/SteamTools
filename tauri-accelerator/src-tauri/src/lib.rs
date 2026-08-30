@@ -390,7 +390,7 @@ fn set_system_proxy(on: bool) {
              "['localhost','127.0.0.1','::1']"]);
         log::info!("已设置系统代理为 127.0.0.1:{DEFAULT_PORT}");
     } else {
-        run(&["set", "org.gnome.system.proxy.mode", "none"]);
+        run(&["set", "org.gnome.system.proxy", "mode", "none"]);
         log::info!("已恢复系统代理（none）");
     }
 }
