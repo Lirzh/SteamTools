@@ -69,7 +69,7 @@ impl Proxy {
             tokio::spawn(async move {
                 log::info!("连接来自 {peer_s}");
                 if let Err(e) = proxy.handle_stream(stream).await {
-                    match is_benign(&e) {
+                    match is_benign(e.as_ref()) {
                         true => log::debug!("连接结束(正常中断, 对端 {peer_s}): {e}"),
                         false => log::warn!("代理流错误(对端 {peer_s}): {e}"),
                     }
@@ -117,7 +117,7 @@ impl Proxy {
             log::info!("[HTTPS] {host}:{port} → 透传");
             let (up_ip, up_port) = self.upstream_for(&host, port);
             let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
-            relay(stream, &mut upstream, Arc::clone(&self.stats)).await
+            relay(stream, upstream, Arc::clone(&self.stats)).await
         }
     }
 
@@ -159,7 +159,7 @@ impl Proxy {
         out.extend_from_slice(&head[body_start..]);
         upstream.write_all(&out).await?;
 
-        relay(stream, &mut upstream, Arc::clone(&self.stats)).await
+        relay(stream, upstream, Arc::clone(&self.stats)).await
     }
 
     /// HTTPS MITM：用本地根 CA 向客户端动态签发叶子证书，再对上游重加密转发。
@@ -196,8 +196,8 @@ impl Proxy {
 /// 方向约定：a=客户端，b=上游；a→b 记为上传，b→a 记为下载。
 async fn relay<A, B>(a: A, b: B, stats: Arc<ProxyStats>) -> crate::Result<()>
 where
-    A: AsyncRead + AsyncWrite + Unpin + 'static,
-    B: AsyncRead + AsyncWrite + Unpin + 'static,
+    A: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut ar, mut aw) = tokio::io::split(a);
     let (mut br, mut bw) = tokio::io::split(b);
@@ -224,7 +224,7 @@ where
 }
 
 /// 是否是连接中断类的良性错误（对端提前关闭/重置/超时），无需打印刷屏。
-fn is_benign(e: &(dyn std::error::Error + Send + Sync)) -> bool {
+fn is_benign(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
     if let Some(io) = e.downcast_ref::<std::io::Error>() {
         matches!(
             io.kind(),

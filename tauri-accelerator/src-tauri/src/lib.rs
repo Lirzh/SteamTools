@@ -430,9 +430,7 @@ pub fn run() {
             log::info!("应用初始化完成");
 
             // 托盘：关闭窗口后转入后台（缺系统托盘库时跳过，仅隐藏窗口）
-            if let Some(app) = build_tray(app) {
-                let _ = app;
-            }
+            let _ = build_tray(app);
             Ok(())
         })
         .on_window_event(|window, event| {
