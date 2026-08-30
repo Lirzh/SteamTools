@@ -47,7 +47,9 @@ impl Proxy {
             let proxy = Arc::clone(&self);
             tokio::spawn(async move {
                 if let Err(e) = proxy.handle_stream(stream).await {
-                    eprintln!("proxy stream error: {e}");
+                    if !is_benign(&e) {
+                        log::error!("proxy stream error: {e}");
+                    }
                 }
             });
         }
@@ -131,7 +133,6 @@ impl Proxy {
         out.extend_from_slice(&head[body_start..]);
         upstream.write_all(&out).await?;
 
-        let mut stream = stream;
         relay(stream, &mut upstream).await
     }
 
@@ -173,6 +174,24 @@ where
 {
     copy_bidirectional(&mut a, &mut b).await?;
     Ok(())
+}
+
+/// 是否是连接中断类的良性错误（对端提前关闭/重置/超时），无需打印刷屏。
+fn is_benign(e: &(dyn std::error::Error + Send + Sync)) -> bool {
+    if let Some(io) = e.downcast_ref::<std::io::Error>() {
+        matches!(
+            io.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WriteZero
+        )
+    } else {
+        false
+    }
 }
 
 /// 读取网络数据直到遇到 `\r\n\r\n`（请求头结尾），返回读出内容。
