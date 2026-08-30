@@ -361,14 +361,14 @@ fn save_config(data_dir: &PathBuf, cfg: &AppConfig) {
     }
 }
 
-/// 系统托盘库是否可用（Linux：libayatana-appindicator3 / libappindicator3）。
+/// 系统托盘库是否可用（Linux：libayatana-appindicator / libappindicator）。
 fn appindicator_available() -> bool {
     std::process::Command::new("ldconfig")
         .arg("-p")
         .output()
         .map(|o| {
             let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            s.contains("libayatana-appindicator3") || s.contains("libappindicator3")
+            s.contains("libayatana-appindicator") || s.contains("libappindicator")
         })
         .unwrap_or(false)
 }
