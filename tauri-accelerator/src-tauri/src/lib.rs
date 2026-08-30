@@ -92,6 +92,7 @@ impl Default for AppConfig {
 /// 运行中的代理句柄。
 struct ProxyHandle {
     task: tauri::async_runtime::JoinHandle<()>,
+    stats: std::sync::Arc<proxy::ProxyStats>,
 }
 
 /// 应用状态。
@@ -178,7 +179,12 @@ async fn start_proxy(
             hosts: cfg.hosts.iter().cloned().collect::<HashSet<_>>(),
             routes: cfg.routes.clone(),
         };
-        let proxy: Arc<Proxy> = Arc::new(Proxy::new(proxy_cfg, Arc::clone(&state.ca)));
+        let stats = std::sync::Arc::new(proxy::ProxyStats::default());
+        let proxy: Arc<Proxy> = Arc::new(Proxy::new(
+            proxy_cfg,
+            Arc::clone(&state.ca),
+            Arc::clone(&stats),
+        ));
         let running = Arc::clone(&proxy);
         let task = tauri::async_runtime::spawn(async move {
             log::info!("代理已启动，监听 127.0.0.1:{DEFAULT_PORT}");
@@ -186,7 +192,7 @@ async fn start_proxy(
                 log::error!("代理异常退出: {e}");
             }
         });
-        *guard = Some(ProxyHandle { task });
+        *guard = Some(ProxyHandle { task, stats });
     }
     let _ = app; // (预留：启动后可回调前端状态)
     Ok(())
@@ -221,6 +227,78 @@ async fn status(
 #[tauri::command]
 fn get_logs() -> Vec<String> {
     log_buffer().lock().unwrap().iter().cloned().collect()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrafficStats {
+    up_bytes: u64,
+    down_bytes: u64,
+}
+
+/// 实时流量（上传/下载字节累计）。
+#[tauri::command]
+async fn get_stats(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> CmdResult<TrafficStats> {
+    let guard = state.proxy.lock().unwrap();
+    match guard.as_ref() {
+        Some(h) => {
+            let (up, down) = h.stats.total();
+            Ok(TrafficStats {
+                up_bytes: up,
+                down_bytes: down,
+            })
+        }
+        None => Ok(TrafficStats {
+            up_bytes: 0,
+            down_bytes: 0,
+        }),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Probe {
+    host: String,
+    ok: bool,
+    ms: u64,
+}
+
+/// 网络连通测试：对给定域名做 TCP 连接并测延迟（先 443，失败回退 80）。
+#[tauri::command]
+async fn connectivity_test(hosts: Vec<String>) -> Vec<Probe> {
+    let mut out = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let t = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            tokio::net::TcpStream::connect((host.as_str(), 443)),
+        )
+        .await;
+        let res = match r {
+            Ok(Ok(_)) => out.push(Probe {
+                host,
+                ok: true,
+                ms: t.elapsed().as_millis() as u64,
+            }),
+            _ => {
+                let t2 = std::time::Instant::now();
+                let r2 = tokio::time::timeout(
+                    std::time::Duration::from_secs(4),
+                    tokio::net::TcpStream::connect((host.as_str(), 80)),
+                )
+                .await;
+                out.push(Probe {
+                    host,
+                    ok: r2.is_ok(),
+                    ms: t2.elapsed().as_millis() as u64,
+                });
+            }
+        };
+        let _ = res;
+    }
+    out
 }
 
 #[tauri::command]
@@ -367,7 +445,9 @@ pub fn run() {
             stop_proxy,
             status,
             set_hosts,
-            get_logs
+            get_logs,
+            get_stats,
+            connectivity_test
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

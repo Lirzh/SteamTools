@@ -1,10 +1,28 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::cert::CertManager;
+
+/// 实时流量计数（上传/下载字节）。
+#[derive(Debug, Default)]
+pub struct ProxyStats {
+    pub up: AtomicU64,
+    pub down: AtomicU64,
+}
+
+impl ProxyStats {
+    /// 返回 (上传, 下载) 字节。
+    pub fn total(&self) -> (u64, u64) {
+        (
+            self.up.load(Ordering::Relaxed),
+            self.down.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// 加速配置。
 #[derive(Debug, Clone)]
@@ -19,11 +37,12 @@ pub struct ProxyConfig {
 pub struct Proxy {
     cfg: ProxyConfig,
     ca: Arc<CertManager>,
+    stats: Arc<ProxyStats>,
 }
 
 impl Proxy {
-    pub fn new(cfg: ProxyConfig, ca: Arc<CertManager>) -> Self {
-        Proxy { cfg, ca }
+    pub fn new(cfg: ProxyConfig, ca: Arc<CertManager>, stats: Arc<ProxyStats>) -> Self {
+        Proxy { cfg, ca, stats }
     }
 
     fn canonical_host(authority: &str) -> String {
@@ -92,7 +111,7 @@ impl Proxy {
         } else {
             let (up_ip, up_port) = self.upstream_for(&host, port);
             let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
-            relay(stream, &mut upstream).await
+            relay(stream, &mut upstream, Arc::clone(&self.stats)).await
         }
     }
 
@@ -133,7 +152,7 @@ impl Proxy {
         out.extend_from_slice(&head[body_start..]);
         upstream.write_all(&out).await?;
 
-        relay(stream, &mut upstream).await
+        relay(stream, &mut upstream, Arc::clone(&self.stats)).await
     }
 
     /// HTTPS MITM：用本地根 CA 向客户端动态签发叶子证书，再对上游重加密转发。
@@ -162,17 +181,31 @@ impl Proxy {
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
         let upstream_stream = connector.connect(server_name, upstream_tcp).await?;
 
-        relay(client_stream, upstream_stream).await
+        relay(client_stream, upstream_stream, Arc::clone(&self.stats)).await
     }
 }
 
-/// 双向转发两个连接。
-async fn relay<A, B>(mut a: A, mut b: B) -> crate::Result<()>
+/// 双向转发两个连接，并累计上传/下载字节到 stats。
+/// 方向约定：a=客户端，b=上游；a→b 记为上传，b→a 记为下载。
+async fn relay<A, B>(a: A, b: B, stats: Arc<ProxyStats>) -> crate::Result<()>
 where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
+    A: AsyncRead + AsyncWrite + Unpin + 'static,
+    B: AsyncRead + AsyncWrite + Unpin + 'static,
 {
-    copy_bidirectional(&mut a, &mut b).await?;
+    let (mut ar, mut aw) = tokio::io::split(a);
+    let (mut br, mut bw) = tokio::io::split(b);
+    let up_stats = Arc::clone(&stats);
+    let up = tokio::spawn(async move {
+        let n = tokio::io::copy(&mut ar, &mut bw).await.unwrap_or(0);
+        up_stats.up.fetch_add(n, Ordering::Relaxed);
+    });
+    let down_stats = Arc::clone(&stats);
+    let down = tokio::spawn(async move {
+        let n = tokio::io::copy(&mut br, &mut aw).await.unwrap_or(0);
+        down_stats.down.fetch_add(n, Ordering::Relaxed);
+    });
+    let _ = up.await;
+    let _ = down.await;
     Ok(())
 }
 
