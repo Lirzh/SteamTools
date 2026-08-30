@@ -77,11 +77,15 @@ struct Status {
     hosts: Vec<String>,
 }
 
-/// 导出根 CA 到 data 目录，返回文件名（用于系统信任库安装）。
+/// 导出根 CA 到可执行文件所在目录，返回完整路径。
 #[tauri::command]
-async fn export_ca(state: tauri::State<'_, std::sync::Arc<AppState>>) -> CmdResult<String> {
+async fn export_ca(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> CmdResult<String> {
     let pem = state.ca.ca_pem();
-    let path = state.data_dir.join("root-ca.pem");
+    let dir = app.path().executable_dir().map_err(cmd_err)?;
+    let path = dir.join("root-ca.pem");
     std::fs::write(&path, pem).map_err(cmd_err)?;
     Ok(path.display().to_string())
 }
