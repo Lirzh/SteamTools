@@ -1,6 +1,0 @@
-[assembly: InternalsVisibleTo("BD.WTTS.Client.Avalonia")]
-[assembly: InternalsVisibleTo("BD.WTTS.UnitTest")]
-[assembly: InternalsVisibleTo("Steam++")]
-[assembly: InternalsVisibleTo("Steam++.Designer")]
-
-[assembly: InternalsVisibleTo("BD.WTTS.Client.Plugins.Accelerator")]
