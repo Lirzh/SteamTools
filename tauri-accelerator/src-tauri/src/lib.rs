@@ -33,7 +33,7 @@ impl log::Log for BufLogger {
         eprintln!("{line}");
         let mut buf = log_buffer().lock().unwrap();
         buf.push_back(line);
-        while buf.len() > 500 {
+        while buf.len() > 100 {
             buf.pop_front();
         }
     }
