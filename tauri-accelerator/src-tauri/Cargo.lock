@@ -3111,6 +3111,7 @@ version = "0.1.0"
 dependencies = [
  "hyper",
  "hyper-util",
+ "log",
  "rcgen",
  "rustls",
  "serde",

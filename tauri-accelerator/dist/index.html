@@ -37,6 +37,11 @@
     .act { display: flex; gap: 10px; }
     .hint { font-size: 12px; color: #8a919c; line-height: 1.7; }
     .msg { font-size: 13px; color: #2b6cff; min-height: 18px; margin-top: 6px; }
+    .log {
+      height: 180px; overflow-y: auto; background: #0f1115; color: #c8d1d9;
+      border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace;
+    }
   </style>
 </head>
 <body>
@@ -67,6 +72,11 @@
     <div class="card">
       <h2>监听地址 127.0.0.1:26561</h2>
       <div class="hint">把系统/应用的 HTTP(S) 代理指向 127.0.0.1:26561 即可生效。勾选域名做 HTTPS 解密加速，未勾选域名透明直连。</div>
+    </div>
+
+    <div class="card">
+      <h2>运行日志</h2>
+      <pre id="logView" class="log"></pre>
     </div>
   </main>
 
@@ -134,6 +144,20 @@
 
     refresh().catch((e) => show('初始化失败: ' + e));
     setInterval(() => refresh().catch(() => {}), 3000);
+
+    let lastLogLen = 0;
+    async function pollLogs() {
+      try {
+        const lines = await invoke('get_logs');
+        if (lines.length !== lastLogLen) {
+          lastLogLen = lines.length;
+          $('logView').textContent = lines.join('\n');
+          $('logView').scrollTop = $('logView').scrollHeight;
+        }
+      } catch (e) {}
+    }
+    setInterval(pollLogs, 1200);
+    pollLogs();
   </script>
 </body>
 </html>
