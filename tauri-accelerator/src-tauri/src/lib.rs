@@ -97,6 +97,37 @@ async fn export_ca(
     Ok(path.display().to_string())
 }
 
+/// 把根 CA 安装到系统信任库（Linux 下用 pkexec 提权）。
+#[tauri::command]
+async fn install_ca(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+) -> CmdResult<String> {
+    let pem = state.ca.ca_pem();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "无法定位可执行文件目录".to_string())?;
+    let cert_path = exe_dir.join("root-ca.pem");
+    std::fs::write(&cert_path, pem).map_err(cmd_err)?;
+
+    let script = format!(
+        "install -m 0644 '{}' /usr/local/share/ca-certificates/steam-accelerator-root-ca.crt && update-ca-certificates 2>/dev/null",
+        cert_path.display()
+    );
+    let status = std::process::Command::new("pkexec")
+        .args(["sh", "-c", &script])
+        .status()
+        .map_err(cmd_err)?;
+    let _ = app;
+    if status.success() {
+        Ok("根证书已安装到系统信任库".to_string())
+    } else {
+        Err("安装未完成(可能已被取消或无权限)".to_string())
+    }
+}
+
 #[tauri::command]
 async fn start_proxy(
     app: tauri::AppHandle,
@@ -230,6 +261,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             export_ca,
+            install_ca,
             start_proxy,
             stop_proxy,
             status,
