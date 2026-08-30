@@ -36,6 +36,16 @@ impl Default for AppConfig {
             "steam-chat.com".into(),
             "steamusercontent.com".into(),
             "steamusercontent-a.akamaihd.net".into(),
+            "github.com".into(),
+            "api.github.com".into(),
+            "githubusercontent.com".into(),
+            "githubassets.com".into(),
+            "raw.githubusercontent.com".into(),
+            "codeload.github.com".into(),
+            "avatars.githubusercontent.com".into(),
+            "objects.githubusercontent.com".into(),
+            "github-cloud.s3.amazonaws.com".into(),
+            "cam.githubusercontent.com".into(),
         ];
         AppConfig {
             port: 26561,
@@ -80,13 +90,20 @@ async fn export_ca(state: tauri::State<'_, std::sync::Arc<AppState>>) -> CmdResu
 async fn start_proxy(
     app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
+    port: u16,
 ) -> CmdResult<()> {
     {
         let mut guard = state.proxy.lock().unwrap();
         if guard.is_some() {
             return Err("代理已在运行".into());
         }
+        // 应用并持久化监听端口
+        {
+            let mut cfg = state.config.lock().unwrap();
+            cfg.port = port;
+        }
         let cfg = state.config.lock().unwrap().clone();
+        save_config(&state.data_dir, &cfg);
         let proxy_cfg = ProxyConfig {
             port: cfg.port,
             hosts: cfg.hosts.iter().cloned().collect::<HashSet<_>>(),
@@ -151,19 +168,6 @@ fn normalize_host(s: &str) -> String {
     s.split(':').next().unwrap_or(s).trim_end_matches('.').to_lowercase()
 }
 
-/// 设置监听端口并持久化。
-#[tauri::command]
-async fn set_port(
-    state: tauri::State<'_, std::sync::Arc<AppState>>,
-    port: u16,
-) -> CmdResult<()> {
-    let mut cfg = state.config.lock().unwrap();
-    cfg.port = port;
-    let cfg = cfg.clone();
-    save_config(&state.data_dir, &cfg);
-    Ok(())
-}
-
 fn cmd_err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -171,7 +175,7 @@ fn cmd_err(e: impl std::fmt::Display) -> String {
 impl AppState {
     fn load_config(data_dir: &PathBuf) -> AppConfig {
         let path = data_dir.join("config.json");
-        match std::fs::read_to_string(&path).ok().map(|s| {
+        let mut c = match std::fs::read_to_string(&path).ok().map(|s| {
             serde_json::from_str::<AppConfig>(&s).unwrap_or_default()
         }) {
             Some(c) => c,
@@ -180,7 +184,14 @@ impl AppState {
                 save_config(data_dir, &c);
                 c
             }
+        };
+        // 合并默认域名清单，保证新增默认域名(如 github)在旧配置中也能出现
+        for h in AppConfig::default().hosts {
+            if !c.hosts.contains(&h) {
+                c.hosts.push(h);
+            }
         }
+        c
     }
 }
 
@@ -218,8 +229,7 @@ pub fn run() {
             start_proxy,
             stop_proxy,
             status,
-            set_hosts,
-            set_port
+            set_hosts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -131,8 +131,7 @@
       try {
         if (running) { await invoke('stop_proxy'); log('已停止'); }
         else {
-          await invoke('set_port', { port: Number($('portInput').value) });
-          await invoke('start_proxy');
+          await invoke('start_proxy', { port: Number($('portInput').value) });
           log('已启动，代理地址 127.0.0.1:' + $('portInput').value);
         }
         await refresh();
