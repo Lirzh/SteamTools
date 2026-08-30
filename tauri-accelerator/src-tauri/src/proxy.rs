@@ -116,7 +116,7 @@ impl Proxy {
         } else {
             log::info!("[HTTPS] {host}:{port} → 透传");
             let (up_ip, up_port) = self.upstream_for(&host, port);
-            let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
+            let upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
             relay(stream, upstream, Arc::clone(&self.stats)).await
         }
     }
