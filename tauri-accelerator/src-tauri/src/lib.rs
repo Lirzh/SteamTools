@@ -194,6 +194,7 @@ async fn start_proxy(
         });
         *guard = Some(ProxyHandle { task, stats });
     }
+    set_system_proxy(true);
     let _ = app; // (预留：启动后可回调前端状态)
     Ok(())
 }
@@ -207,6 +208,7 @@ async fn stop_proxy(
         h.task.abort();
         log::info!("代理已停止");
     }
+    set_system_proxy(false);
     Ok(())
 }
 
@@ -358,6 +360,38 @@ fn save_config(data_dir: &PathBuf, cfg: &AppConfig) {
     if let Ok(s) = serde_json::to_string_pretty(cfg) {
         let _ = std::fs::create_dir_all(data_dir);
         let _ = std::fs::write(data_dir.join("config.json"), s);
+    }
+}
+
+/// 设置/恢复系统代理（Linux：通过 GNOME 的 gsettings）。
+///
+/// 开启时指向 127.0.0.1:26561，关闭时恢复为"不使用代理"。
+fn set_system_proxy(on: bool) {
+    let gsettings = match std::process::Command::new("gsettings").arg("--version").output() {
+        Ok(o) if o.status.success() => "gsettings",
+        _ => {
+            log::warn!("未找到 gsettings，无法自动设置系统代理");
+            return;
+        }
+    };
+    let run = |args: &[&str]| {
+        std::process::Command::new(gsettings)
+            .args(args)
+            .status()
+            .is_ok()
+    };
+    if on {
+        run(&["set", "org.gnome.system.proxy", "mode", "manual"]);
+        run(&["set", "org.gnome.system.proxy.http", "host", "127.0.0.1"]);
+        run(&["set", "org.gnome.system.proxy.http", "port", "26561"]);
+        run(&["set", "org.gnome.system.proxy.https", "host", "127.0.0.1"]);
+        run(&["set", "org.gnome.system.proxy.https", "port", "26561"]);
+        run(&["set", "org.gnome.system.proxy.ignore-hosts",
+             "['localhost','127.0.0.1','::1']"]);
+        log::info!("已设置系统代理为 127.0.0.1:{DEFAULT_PORT}");
+    } else {
+        run(&["set", "org.gnome.system.proxy.mode", "none"]);
+        log::info!("已恢复系统代理（none）");
     }
 }
 
