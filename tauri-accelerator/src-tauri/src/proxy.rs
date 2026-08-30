@@ -61,13 +61,17 @@ impl Proxy {
     /// 启动监听（HTTP 代理，用于流量的 MITM/透传）。
     pub async fn run(self: Arc<Self>) -> crate::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", self.cfg.port)).await?;
+        log::info!("代理正在监听 127.0.0.1:{}", self.cfg.port);
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, peer) = listener.accept().await?;
+            let peer_s = peer.to_string();
             let proxy = Arc::clone(&self);
             tokio::spawn(async move {
+                log::info!("连接来自 {peer_s}");
                 if let Err(e) = proxy.handle_stream(stream).await {
-                    if !is_benign(&e) {
-                        log::error!("proxy stream error: {e}");
+                    match is_benign(&e) {
+                        true => log::debug!("连接结束(正常中断, 对端 {peer_s}): {e}"),
+                        false => log::warn!("代理流错误(对端 {peer_s}): {e}"),
                     }
                 }
             });
@@ -107,8 +111,10 @@ impl Proxy {
 
         let host = Self::canonical_host(&host);
         if self.cfg.hosts.contains(&host) {
+            log::info!("[HTTPS] {host}:{port} → MITM 加速");
             self.proxy_mitm(stream, host).await
         } else {
+            log::info!("[HTTPS] {host}:{port} → 透传");
             let (up_ip, up_port) = self.upstream_for(&host, port);
             let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
             relay(stream, &mut upstream, Arc::clone(&self.stats)).await
@@ -135,6 +141,7 @@ impl Proxy {
         let default_port = if target.starts_with("https://") { 443 } else { 80 };
         let p = port.unwrap_or(default_port);
         let (up_ip, up_port) = self.upstream_for(&hostname, p);
+        log::info!("[HTTP] {method} {hostname} → {up_ip}:{up_port}");
 
         let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
 
@@ -194,6 +201,8 @@ where
 {
     let (mut ar, mut aw) = tokio::io::split(a);
     let (mut br, mut bw) = tokio::io::split(b);
+    let up_before = stats.up.load(Ordering::Relaxed);
+    let down_before = stats.down.load(Ordering::Relaxed);
     let up_stats = Arc::clone(&stats);
     let up = tokio::spawn(async move {
         let n = tokio::io::copy(&mut ar, &mut bw).await.unwrap_or(0);
@@ -206,6 +215,11 @@ where
     });
     let _ = up.await;
     let _ = down.await;
+    let up = stats.up.load(Ordering::Relaxed) - up_before;
+    let down = stats.down.load(Ordering::Relaxed) - down_before;
+    if up > 0 || down > 0 {
+        log::info!("转发完成: 上传 {up} 字节, 下载 {down} 字节");
+    }
     Ok(())
 }
 

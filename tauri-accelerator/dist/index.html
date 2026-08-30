@@ -50,6 +50,7 @@
       border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.6;
       white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace;
     }
+    #trafficChart { width: 100%; max-width: 780px; height: auto; display: block; }
   </style>
 </head>
 <body>
@@ -79,6 +80,14 @@
       <div class="host-grid" id="hostList"></div>
       <div class="msg" id="testMsg"></div>
       <div class="hint" style="margin-top:10px">勾选即加速（HTTPS 解密），未勾选透明直连。系统代理指向 127.0.0.1:26561。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>实时流量</h2><div class="hint-ms"></div>
+        <span id="chartTotals" style="font-size:12px;color:#5a616b"></span>
+      </div>
+      <canvas id="trafficChart" width="780" height="180"></canvas>
+      <div class="hint" style="margin-top:6px">蓝色=下载，橙色=上传；近 60 秒速率。</div>
     </div>
 
     <div class="card">
@@ -146,6 +155,45 @@
       await invoke('set_hosts', { hosts: await checkedHosts() });
     }
 
+    function fmtTotal(b) {
+      if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + 'MB';
+      if (b >= 1024) return (b / 1024).toFixed(0) + 'KB';
+      return b + 'B';
+    }
+
+    const MAX_POINTS = 60;
+    const rateHist = []; // {up, down} 每秒速率
+    function drawChart() {
+      const cv = $('trafficChart');
+      if (!cv) return;
+      const ctx = cv.getContext('2d');
+      const W = cv.width, H = cv.height;
+      ctx.clearRect(0, 0, W, H);
+      const padL = 8, padR = 8, padT = 10, padB = 18;
+      const plotW = W - padL - padR, plotH = H - padT - padB;
+      let max = 1024;
+      rateHist.forEach((p) => { max = Math.max(max, p.up, p.down); });
+      const px = (i) => padL + plotW * (rateHist.length <= 1 ? 1 : i / (rateHist.length - 1));
+      const py = (v) => padT + plotH * (1 - v / max);
+      // 网格
+      ctx.strokeStyle = '#eceff3'; ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + plotH * i / 4;
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+      }
+      const line = (key, color) => {
+        if (rateHist.length < 2) return;
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+        rateHist.forEach((p, i) => {
+          const x = px(i), y = py(p[key]);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+      line('up', '#ff9f0a');
+      line('down', '#2b6cff');
+    }
+
     async function pollStats() {
       try {
         const s = await invoke('get_stats');
@@ -155,8 +203,12 @@
           const up = (s.upBytes - lastStats.upBytes) / dt;
           const down = (s.downBytes - lastStats.downBytes) / dt;
           $('traffic').textContent = '↓ ' + fmtRate(down) + '/s  ↑ ' + fmtRate(up) + '/s';
+          rateHist.push({ up, down });
+          if (rateHist.length > MAX_POINTS) rateHist.shift();
+          drawChart();
         }
         lastStats = s; lastStatsT = t;
+        $('chartTotals').textContent = '累计 ↑ ' + fmtTotal(s.upBytes) + ' / ↓ ' + fmtTotal(s.downBytes);
       } catch (e) {}
     }
 

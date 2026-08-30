@@ -278,7 +278,7 @@ async fn connectivity_test(hosts: Vec<String>) -> Vec<Probe> {
         .await;
         let res = match r {
             Ok(Ok(_)) => out.push(Probe {
-                host,
+                host: host.clone(),
                 ok: true,
                 ms: t.elapsed().as_millis() as u64,
             }),
@@ -290,13 +290,16 @@ async fn connectivity_test(hosts: Vec<String>) -> Vec<Probe> {
                 )
                 .await;
                 out.push(Probe {
-                    host,
+                    host: host.clone(),
                     ok: r2.is_ok(),
                     ms: t2.elapsed().as_millis() as u64,
                 });
             }
         };
         let _ = res;
+        if let Some(p) = out.last() {
+            log::info!("连通测试 {}: {} {}ms", host, if p.ok { "可达" } else { "不可达" }, p.ms);
+        }
     }
     out
 }
@@ -309,6 +312,7 @@ async fn set_hosts(
 ) -> CmdResult<()> {
     let mut cfg = state.config.lock().unwrap();
     cfg.hosts = hosts.iter().map(|s| normalize_host(s)).collect();
+    log::info!("已更新加速域名: {}", cfg.hosts.join(", "));
     let cfg = cfg.clone();
     save_config(&state.data_dir, &cfg);
     drop(cfg);
