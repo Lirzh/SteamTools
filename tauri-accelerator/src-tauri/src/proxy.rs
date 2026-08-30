@@ -58,6 +58,17 @@ impl Proxy {
         (host.to_string(), default_port)
     }
 
+    /// 是否为加速域名（精确匹配，或子域匹配：`github.githubassets.com` 命中 `githubassets.com`）。
+    fn is_accel_host(&self, host: &str) -> bool {
+        self.cfg.hosts.iter().any(|base| {
+            host == base || {
+                host.len() > base.len()
+                    && host.ends_with(base)
+                    && host.as_bytes()[host.len() - base.len() - 1] == b'.'
+            }
+        })
+    }
+
     /// 启动监听（HTTP 代理，用于流量的 MITM/透传）。
     pub async fn run(self: Arc<Self>) -> crate::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", self.cfg.port)).await?;
@@ -110,7 +121,7 @@ impl Proxy {
             .await?;
 
         let host = Self::canonical_host(&host);
-        if self.cfg.hosts.contains(&host) {
+        if self.is_accel_host(&host) {
             log::info!("[HTTPS] {host}:{port} → MITM 加速");
             self.proxy_mitm(stream, host).await
         } else {
