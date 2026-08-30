@@ -361,24 +361,8 @@ fn save_config(data_dir: &PathBuf, cfg: &AppConfig) {
     }
 }
 
-/// 系统托盘库是否可用（Linux：libayatana-appindicator / libappindicator）。
-fn appindicator_available() -> bool {
-    std::process::Command::new("ldconfig")
-        .arg("-p")
-        .output()
-        .map(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            s.contains("libayatana-appindicator") || s.contains("libappindicator")
-        })
-        .unwrap_or(false)
-}
-
-/// 尽力创建托盘；缺库返回 None（此时关闭窗口仅隐藏，不崩溃）。
+/// 尽力创建托盘；失败则关闭窗口时仅隐藏（不崩溃）。
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    if !appindicator_available() {
-        log::warn!("未检测到系统托盘库，关闭窗口后仅隐藏，后台持续运行");
-        return Ok(());
-    }
     let Some(icon) = app.default_window_icon().cloned() else {
         log::warn!("无默认图标，跳过托盘");
         return Ok(());
@@ -403,6 +387,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
+    log::info!("系统托盘已创建");
     Ok(())
 }
 
@@ -429,8 +414,11 @@ pub fn run() {
             app.manage(state);
             log::info!("应用初始化完成");
 
-            // 托盘：关闭窗口后转入后台（缺系统托盘库时跳过，仅隐藏窗口）
-            let _ = build_tray(app);
+            // 托盘：关闭窗口后转入后台
+            match build_tray(app) {
+                Ok(()) => {}
+                Err(e) => log::warn!("创建系统托盘失败: {e}"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
