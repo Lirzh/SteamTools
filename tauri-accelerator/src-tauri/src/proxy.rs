@@ -107,21 +107,21 @@ impl Proxy {
     /// 读取请求头（到 `\r\n\r\n`）后，按方法分流：
     /// - `CONNECT`：回复 200 后进入隧道（加速域名 MITM，其余透传）。
     /// - 其它方法：把请求盲转发起上方节点，随后双向转发。
-    async fn handle_stream(&self, mut stream: TcpStream) -> crate::Result<()> {
+    async fn handle_stream(self: Arc<Self>, mut stream: TcpStream) -> crate::Result<()> {
         let head = read_head(&mut stream).await?;
         if head.starts_with(b"CONNECT") {
-            return self.handle_connect(stream, &head).await;
+            return self.handle_connect(stream, head).await;
         }
-        self.handle_plain(stream, &head).await
+        self.handle_plain(stream, head).await
     }
 
     /// CONNECT：先回 200 建立隧道，再按域名决定 MITM 还是纯透传。
-    async fn handle_connect(&self, stream: TcpStream, head: &[u8]) -> crate::Result<()> {
+    async fn handle_connect(self: Arc<Self>, stream: TcpStream, head: Vec<u8>) -> crate::Result<()> {
         let first = head
             .split(|&b| b == b'\n')
             .next()
             .unwrap_or(b"");
-        let first = String::from_utf8_lossy(first);
+        let first = String::from_utf8_lossy(first).into_owned();
         let target = first.split_whitespace().nth(1).unwrap_or("").to_string();
 
         let (host, port) = split_host_port(&target, 443);
@@ -140,14 +140,14 @@ impl Proxy {
         } else {
             log::info!("[HTTPS] {host}:{port} → 透传");
             let (up_ip, up_port) = self.upstream_for(&host, port);
-            let upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
+            let upstream = TcpStream::connect((up_ip.clone(), up_port)).await?;
             relay(stream, upstream, Arc::clone(&self.stats)).await
         }
     }
 
     /// 普通请求：把请求头改写为 origin-form 后原样转发，其余字节双向透传。
-    async fn handle_plain(&self, stream: TcpStream, head: &[u8]) -> crate::Result<()> {
-        let head_str = String::from_utf8_lossy(head);
+    async fn handle_plain(self: Arc<Self>, stream: TcpStream, head: Vec<u8>) -> crate::Result<()> {
+        let head_str = String::from_utf8_lossy(&head).into_owned();
         let mut lines = head_str.split("\r\n");
         let request_line = lines.next().unwrap_or("");
         let mut rp = request_line.split_whitespace();
@@ -167,7 +167,7 @@ impl Proxy {
         let (up_ip, up_port) = self.upstream_for(&hostname, p);
         log::info!("[HTTP] {method} {hostname} → {up_ip}:{up_port}");
 
-        let mut upstream = TcpStream::connect((up_ip.as_str(), up_port)).await?;
+        let mut upstream = TcpStream::connect((up_ip.clone(), up_port)).await?;
 
         // 若目标为绝对形式，把请求行改写为 origin-form，并重新写 Host
         let new_request_line = if absolute_target_authority(&target).is_some() {
@@ -187,8 +187,8 @@ impl Proxy {
     }
 
     /// HTTPS MITM：用本地根 CA 向客户端动态签发叶子证书；
-    /// 后续客户端 HTTP/1.1 请求通过「同主机共享的 HTTP/2 上游连接」复用转发。
-    async fn proxy_mitm(&self, stream: TcpStream, host: String) -> crate::Result<()> {
+    /// 后续客户端 HTTP/1.1 请求，手动解析后经「同主机共享的 HTTP/2 上游连接」复用转发。
+    async fn proxy_mitm(self: Arc<Self>, stream: TcpStream, host: String) -> crate::Result<()> {
         // 客户端侧 TLS 服务端：按 SNI 动态签发叶子证书
         let resolver = self.ca.resolver();
         let server_cfg = rustls::ServerConfig::builder()
@@ -196,17 +196,68 @@ impl Proxy {
             .with_cert_resolver(resolver);
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
         let client_stream = acceptor.accept(stream).await?;
+        let (mut rd, mut wr) = tokio::io::split(client_stream);
+        // pending 保存一次大读中可能多读出来的字节（请求体开头），避免被丢弃而破坏转发。
+        let mut pending: Vec<u8> = Vec::new();
 
-        let pool = Arc::clone(&self.pool);
-        let service = hyper::service::service_fn(move |req: Request<Incoming>| {
-            let pool = Arc::clone(&pool);
-            let host = host.clone();
-            async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(handle_upstream(pool, &host, req).await?) }
-        });
-        let conn = hyper::server::conn::http1::Builder::new()
-            .serve_connection(Box::pin(TokioIo::new(client_stream)), service)
-            .with_upgrades();
-        let _ = conn.await;
+        loop {
+            // 读取一个 HTTP/1 请求头
+            let Some(head) = take_head(&mut rd, &mut pending).await? else {
+                break; // 客户端关闭连接
+            };
+            let head_str = String::from_utf8_lossy(&head).into_owned();
+            let mut lines = head_str.split("\r\n");
+            let req_line = lines.next().unwrap_or("").to_string();
+            let mut rp = req_line.split_whitespace();
+            let method = rp.next().unwrap_or("GET").to_string();
+            let target = rp.next().unwrap_or("/").to_string();
+            let path = absolute_path(&target);
+
+            let mut content_length = 0usize;
+            let mut out_headers: Vec<(String, String)> = Vec::new();
+            for line in lines {
+                let Some(col) = line.find(':') else { continue };
+                let name = line[..col].trim().to_string();
+                let value = line[col + 1..].trim().to_string();
+                let low = name.to_ascii_lowercase();
+                let hop = matches!(
+                    low.as_str(),
+                    "host"
+                        | "connection"
+                        | "keep-alive"
+                        | "proxy-connection"
+                        | "transfer-encoding"
+                        | "upgrade"
+                        | "proxy-authorization"
+                        | "te"
+                        | "trailer"
+                        | "content-length"
+                );
+                if hop {
+                    if low == "content-length" {
+                        content_length = value.parse().unwrap_or(0);
+                    }
+                    continue;
+                }
+                out_headers.push((name, value));
+            }
+
+            // 读取请求体（优先消费 pending 中已多读出的字节）
+            let body = take_bytes(&mut rd, &mut pending, content_length).await?;
+
+            // 经共享 HTTP/2 上游连接转发，并取回 HTTP/1 形式响应
+            let resp = forward_upstream(
+                Arc::clone(&self.pool),
+                host.clone(),
+                &method,
+                &path,
+                &out_headers,
+                &body,
+            )
+            .await?;
+            wr.write_all(&resp).await?;
+            wr.flush().await?;
+        }
         Ok(())
     }
 }
@@ -230,44 +281,44 @@ impl UpstreamPool {
     /// 若发送端已失效（上游断开），移除坏连接并重建后重试一次。
     async fn send(
         &self,
-        host: &str,
+        host: String,
         req: Request<Full<Bytes>>,
     ) -> crate::Result<Response<Incoming>> {
         // clone 出便宜的多路复用发送端（body 为 Arc<Bytes>，浅拷贝）。
         // 发送端拿到后锁即释放，允许同主机多个请求在 Y 一条连接上真正并行。
-        let mut sender = self.sender(host).await?;
+        let mut sender = self.sender(host.clone()).await?;
         match sender.send_request(req.clone()).await {
             Ok(res) => Ok(res),
             Err(_) => {
                 // 连接可能已陈旧/被上游关闭：移除坏连接，重建后重试一次。
-                self.dispose(host).await;
-                let sender = self.sender(host).await?;
+                self.dispose(host.clone()).await;
+                let mut sender = self.sender(host).await?;
                 Ok(sender.send_request(req).await?)
             }
         }
     }
 
     /// 在锁内取出（或首次建立）该主机的 HTTP/2 发送端后立即释放锁。
-    async fn sender(&self, host: &str) -> crate::Result<SendRequest<Full<Bytes>>> {
+    async fn sender(&self, host: String) -> crate::Result<SendRequest<Full<Bytes>>> {
         let mut guard = self.inner.lock().await;
-        if let Some(s) = guard.get(host) {
+        if let Some(s) = guard.get(&host) {
             return Ok(s.clone());
         }
-        let s = establish_http2(host).await?;
-        guard.insert(host.to_string(), s.clone());
+        let s = establish_http2(host.clone()).await?;
+        guard.insert(host.clone(), s.clone());
         log::info!("[上游] 已建立 {host} 的共享 HTTP/2 连接");
         Ok(s)
     }
 
-    async fn dispose(&self, host: &str) {
+    async fn dispose(&self, host: String) {
         let mut guard = self.inner.lock().await;
-        guard.remove(host);
+        guard.remove(&host);
     }
 }
 
 /// 建一条到 host:443 的 HTTP/2 上游连接（TLS 不校验 + ALPN h2）。
-async fn establish_http2(host: &str) -> crate::Result<SendRequest<Full<Bytes>>> {
-    let mut addrs = tokio::net::lookup_host((host, 443)).await?;
+async fn establish_http2(host: String) -> crate::Result<SendRequest<Full<Bytes>>> {
+    let mut addrs = tokio::net::lookup_host((host.clone(), 443)).await?;
     let ip = addrs
         .next()
         .ok_or_else(|| std::io::Error::other("dns no result"))?;
@@ -283,55 +334,78 @@ async fn establish_http2(host: &str) -> crate::Result<SendRequest<Full<Bytes>>> 
     let tls = connector.connect(server_name, tcp).await?;
     let (sender, connection) =
         http2_handshake(TokioExecutor::new(), Box::pin(TokioIo::new(tls))).await?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            log::debug!("上游 http2 连接结束: {e}");
-        }
-    });
+    {
+        // 驱动共享连接的读取循环。
+        let connection = connection;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+    }
     Ok(sender)
 }
 
-/// 把客户端的一个 HTTP 请求（已 MITM 解密）转送到共享上游，并回读响应。
-async fn handle_upstream(
+/// 构建并发送 HTTP/2 请求经共享上游，再把响应序列化为 HTTP/1.1 文本返回。
+///
+/// `host` 已被解析出来（不含端口），`path` 为 origin-form（含前导 `/` 与 query）。
+async fn forward_upstream(
     pool: Arc<UpstreamPool>,
-    host: &str,
-    req: Request<Incoming>,
-) -> crate::Result<Response<Full<Bytes>>> {
-    let (parts, body) = req.into_parts();
-    let body_bytes = body.collect().await?;
-    let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    host: String,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> crate::Result<Vec<u8>> {
+    // 用绝对 URI 让 hyper 生成正确的伪头（:scheme/:authority/:path），
+    // 再补上其余头部（connection 等逐跳头已在调用方剔除）。
     let uri = format!("https://{host}{path}");
+    let method: hyper::Method = method
+        .parse()
+        .map_err(|_| std::io::Error::other("invalid method"))?;
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    let req = builder.body(Full::from(Bytes::copy_from_slice(body)))?;
 
-    let mut ureq = Request::builder()
-        .method(parts.method.clone())
-        .uri(uri)
-        .version(hyper::Version::HTTP_2)
-        .header(hyper::header::HOST, host)
-        .body(Full::from(body_bytes))?;
-    for (name, value) in &parts.headers {
-        let low = name.as_str().to_ascii_lowercase();
-        let hop = matches!(
-            low.as_str(),
-            "host"
-                | "connection"
+    let resp = pool.send(host, req).await?;
+    let (parts, resp_body) = resp.into_parts();
+    let collected = resp_body.collect().await?;
+    let bytes = collected.to_bytes();
+
+    // 序列化 HTTP/1.1 响应：状态行 + 头（剔除逐跳头，统一写 Content-Length）。
+    let mut out = format!(
+        "HTTP/1.1 {} {}\r\n",
+        parts.status.as_u16(),
+        parts
+            .status
+            .canonical_reason()
+            .unwrap_or("")
+    )
+    .into_bytes();
+    for (name, value) in parts.headers.iter() {
+        let n = name.as_str();
+        if matches!(
+            n,
+            "connection"
                 | "keep-alive"
-                | "proxy-connection"
                 | "transfer-encoding"
+                | "content-length"
                 | "upgrade"
-                | "proxy-authorization"
+                | "proxy-connection"
                 | "te"
                 | "trailer"
-        );
-        if hop {
+        ) {
             continue;
         }
-        ureq.headers_mut().insert(name.clone(), value.clone());
+        out.extend_from_slice(n.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
     }
-
-    let res = pool.send(host, ureq).await?;
-    let (rparts, rbody) = res.into_parts();
-    let rbytes = rbody.collect().await?;
-    Ok(Response::from_parts(rparts, Full::from(rbytes)))
+    out.extend_from_slice(format!("Content-Length: {}\r\n", bytes.len()).as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(&bytes);
+    Ok(out)
 }
 
 /// 双向转发两个连接，并累计上传/下载字节到 stats。
@@ -384,7 +458,10 @@ fn is_benign(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
 }
 
 /// 读取网络数据直到遇到 `\r\n\r\n`（请求头结尾），返回读出内容。
-async fn read_head(stream: &mut TcpStream) -> crate::Result<Vec<u8>> {
+async fn read_head<R>(stream: &mut R) -> crate::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
     loop {
@@ -407,6 +484,68 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|w| w == needle)
+}
+
+/// 从数据流中取一个 HTTP/1 请求头（到 `\r\n\r\n`），返回不含结尾分隔符的头部字节。
+///
+/// `pending` 为跨读取调用保留的缓冲：一次网络读可能同时带出头部之后的字节（如请求体
+/// 开头），这些字节必须留给 `take_bytes` 消费，否则会丢失从而破坏转发。
+/// 返回 `None` 表示对端已关闭连接。
+async fn take_head<R>(
+    rd: &mut R,
+    pending: &mut Vec<u8>,
+) -> crate::Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        if let Some(idx) = find_subslice_index(pending, b"\r\n\r\n") {
+            // idx 是分隔符起点；drain 掉头部本体，再 drain 掉 4 字节分隔符。
+            let head: Vec<u8> = pending.drain(..idx).collect();
+            pending.drain(..4);
+            return Ok(Some(head));
+        }
+        if pending.len() > 65536 {
+            return Err(std::io::Error::other("headers too large").into());
+        }
+        let before = pending.len();
+        let n = rd.read_buf(pending).await?;
+        if n == 0 && pending.len() == before {
+            return if pending.is_empty() {
+                Ok(None)
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof in head").into())
+            };
+        }
+    }
+}
+
+/// 从数据流取恰好 `n` 个字节作为请求体，优先消费 `pending` 中的残留字节。
+async fn take_bytes<R>(
+    rd: &mut R,
+    pending: &mut Vec<u8>,
+    n: usize,
+) -> crate::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        if pending.len() >= n {
+            return Ok(pending.drain(..n).collect());
+        }
+        let r = rd.read_buf(pending).await?;
+        if r == 0 {
+            return Err(
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof in body").into(),
+            );
+        }
+    }
+}
+
+fn find_subslice_index(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 /// 解析绝对形式的请求目标中的 authority：`http://host:port/path`。
