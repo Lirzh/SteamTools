@@ -71,8 +71,8 @@
 
     <div class="card">
       <h2>运行状态</h2>
-      <div class="row"><label>监听端口</label><input id="portInput" value="26561" /></div>
-      <div class="hint">把系统/应用的 HTTP(S) 代理指向 <b>127.0.0.1:端口</b> 即可生效；勾选的域名会做 HTTPS 解密加速，未勾选域名透明直连。</div>
+      <div class="row"><label>监听端口</label><span style="font-size:14px;color:#e6e8ec;font-weight:600">26561</span></div>
+      <div class="hint">把系统/应用的 HTTP(S) 代理指向 <b>127.0.0.1:26561</b> 即可生效；勾选的域名会做 HTTPS 解密加速，未勾选域名透明直连。</div>
     </div>
 
     <div class="card">
@@ -110,7 +110,6 @@
       const s = await invoke('status');
       running = s.running;
       currentHosts = s.hosts;
-      $('portInput').value = s.port;
       $('statusDot').className = 'dot' + (running ? ' running' : '');
       $('statusTxt').textContent = running ? '运行中 @ 127.0.0.1:' + s.port : '未运行';
       $('btnToggle').textContent = running ? '停止加速' : '开始加速';
@@ -130,10 +129,7 @@
     $('btnToggle').onclick = async () => {
       try {
         if (running) { await invoke('stop_proxy'); log('已停止'); }
-        else {
-          await invoke('start_proxy', { port: Number($('portInput').value) });
-          log('已启动，代理地址 127.0.0.1:' + $('portInput').value);
-        }
+        else { await invoke('start_proxy'); log('已启动，代理地址 127.0.0.1:26561'); }
         await refresh();
       } catch (e) { log('操作失败: ' + e); }
     };

@@ -13,10 +13,12 @@ use tauri::Manager;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub type CmdResult<T> = std::result::Result<T, String>;
 
+/// 固定监听端口。
+const DEFAULT_PORT: u16 = 26561;
+
 /// 持久化配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
-    port: u16,
     hosts: Vec<String>,
     routes: HashMap<String, String>,
 }
@@ -48,7 +50,6 @@ impl Default for AppConfig {
             "cam.githubusercontent.com".into(),
         ];
         AppConfig {
-            port: 26561,
             hosts,
             routes: HashMap::new(),
         }
@@ -57,7 +58,6 @@ impl Default for AppConfig {
 
 /// 运行中的代理句柄。
 struct ProxyHandle {
-    port: u16,
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -90,22 +90,15 @@ async fn export_ca(state: tauri::State<'_, std::sync::Arc<AppState>>) -> CmdResu
 async fn start_proxy(
     app: tauri::AppHandle,
     state: tauri::State<'_, std::sync::Arc<AppState>>,
-    port: u16,
 ) -> CmdResult<()> {
     {
         let mut guard = state.proxy.lock().unwrap();
         if guard.is_some() {
             return Err("代理已在运行".into());
         }
-        // 应用并持久化监听端口
-        {
-            let mut cfg = state.config.lock().unwrap();
-            cfg.port = port;
-        }
         let cfg = state.config.lock().unwrap().clone();
-        save_config(&state.data_dir, &cfg);
         let proxy_cfg = ProxyConfig {
-            port: cfg.port,
+            port: DEFAULT_PORT,
             hosts: cfg.hosts.iter().cloned().collect::<HashSet<_>>(),
             routes: cfg.routes.clone(),
         };
@@ -116,7 +109,7 @@ async fn start_proxy(
                 eprintln!("proxy exited: {e}");
             }
         });
-        *guard = Some(ProxyHandle { port: cfg.port, task });
+        *guard = Some(ProxyHandle { task });
     }
     let _ = app; // (预留：启动后可回调前端状态)
     Ok(())
@@ -141,7 +134,7 @@ async fn status(
     let cfg = state.config.lock().unwrap().clone();
     Ok(Status {
         running: guard.is_some(),
-        port: cfg.port,
+        port: DEFAULT_PORT,
         hosts: cfg.hosts.clone(),
     })
 }
