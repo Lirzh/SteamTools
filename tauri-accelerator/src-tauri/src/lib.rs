@@ -84,9 +84,16 @@ async fn export_ca(
     state: tauri::State<'_, std::sync::Arc<AppState>>,
 ) -> CmdResult<String> {
     let pem = state.ca.ca_pem();
-    let dir = app.path().executable_dir().map_err(cmd_err)?;
+    // 优先取可执行文件所在目录
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok());
+    let dir = exe_dir.ok_or_else(|| "无法定位可执行文件目录".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(cmd_err)?;
     let path = dir.join("root-ca.pem");
     std::fs::write(&path, pem).map_err(cmd_err)?;
+    let _ = app; // (预留)
     Ok(path.display().to_string())
 }
 
