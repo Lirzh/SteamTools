@@ -157,8 +157,10 @@ async fn install_ca(
         .map_err(cmd_err)?;
     let _ = app;
     if status.success() {
+        log::info!("根证书已安装到系统信任库");
         Ok("根证书已安装到系统信任库".to_string())
     } else {
+        log::warn!("根证书安装未完成(可能已被取消或无权限)");
         Err("安装未完成(可能已被取消或无权限)".to_string())
     }
 }
