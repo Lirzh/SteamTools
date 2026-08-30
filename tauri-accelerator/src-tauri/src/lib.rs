@@ -233,6 +233,12 @@ fn get_logs() -> Vec<String> {
     log_buffer().lock().unwrap().iter().cloned().collect()
 }
 
+/// 清空日志缓冲。
+#[tauri::command]
+fn clear_logs() {
+    log_buffer().lock().unwrap().clear();
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrafficStats {
@@ -409,7 +415,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = tauri::menu::Menu::with_items(app, &[&show_i, &quit_i])?;
     tauri::tray::TrayIconBuilder::new()
         .icon(icon)
-        .tooltip("Steam++ 网络加速")
+        .tooltip("Pika+")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -476,6 +482,7 @@ pub fn run() {
             status,
             set_hosts,
             get_logs,
+            clear_logs,
             get_stats,
             connectivity_test
         ])

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Steam++ Accelerator",
+  "productName": "Pika+ Accelerator",
   "version": "0.1.0",
   "identifier": "net.steampp.accelerator",
   "build": {
@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "Steam++ 网络加速",
+        "title": "Pika+",
         "width": 960,
         "height": 680,
         "minWidth": 720,
