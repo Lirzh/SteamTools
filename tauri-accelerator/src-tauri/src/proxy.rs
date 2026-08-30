@@ -2,8 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::client::conn::http2::{handshake as http2_handshake, SendRequest};
+use hyper::body::Incoming;
+use hyper::{Request, Response};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::cert::CertManager;
 
@@ -38,11 +45,17 @@ pub struct Proxy {
     cfg: ProxyConfig,
     ca: Arc<CertManager>,
     stats: Arc<ProxyStats>,
+    pool: Arc<UpstreamPool>,
 }
 
 impl Proxy {
     pub fn new(cfg: ProxyConfig, ca: Arc<CertManager>, stats: Arc<ProxyStats>) -> Self {
-        Proxy { cfg, ca, stats }
+        Proxy {
+            cfg,
+            ca,
+            stats,
+            pool: Arc::new(UpstreamPool::new()),
+        }
     }
 
     fn canonical_host(authority: &str) -> String {
@@ -173,7 +186,8 @@ impl Proxy {
         relay(stream, upstream, Arc::clone(&self.stats)).await
     }
 
-    /// HTTPS MITM：用本地根 CA 向客户端动态签发叶子证书，再对上游重加密转发。
+    /// HTTPS MITM：用本地根 CA 向客户端动态签发叶子证书；
+    /// 后续客户端 HTTP/1.1 请求通过「同主机共享的 HTTP/2 上游连接」复用转发。
     async fn proxy_mitm(&self, stream: TcpStream, host: String) -> crate::Result<()> {
         // 客户端侧 TLS 服务端：按 SNI 动态签发叶子证书
         let resolver = self.ca.resolver();
@@ -183,24 +197,141 @@ impl Proxy {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
         let client_stream = acceptor.accept(stream).await?;
 
-        let (up_host, up_port) = self.upstream_for(&host, 443);
-        let mut addrs = tokio::net::lookup_host((up_host.as_str(), up_port)).await?;
-        let up_ip = addrs
-            .next()
-            .ok_or_else(|| std::io::Error::other("dns no result"))?;
-        let upstream_tcp = TcpStream::connect(up_ip).await?;
-
-        let server_name = rustls::pki_types::ServerName::try_from(host)
-            .map_err(|_| std::io::Error::other("bad host"))?;
-        let client_cfg = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NullVerifier))
-            .with_no_client_auth();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
-        let upstream_stream = connector.connect(server_name, upstream_tcp).await?;
-
-        relay(client_stream, upstream_stream, Arc::clone(&self.stats)).await
+        let pool = Arc::clone(&self.pool);
+        let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+            let pool = Arc::clone(&pool);
+            let host = host.clone();
+            async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(handle_upstream(pool, &host, req).await?) }
+        });
+        let conn = hyper::server::conn::http1::Builder::new()
+            .serve_connection(Box::pin(TokioIo::new(client_stream)), service)
+            .with_upgrades();
+        let _ = conn.await;
+        Ok(())
     }
+}
+
+/// 按 host 共享单一 HTTP/2 上游连接的连接池。
+struct UpstreamPool {
+    inner: AsyncMutex<HashMap<String, SendRequest<Full<Bytes>>>>,
+}
+
+impl UpstreamPool {
+    fn new() -> Self {
+        Self {
+            inner: AsyncMutex::new(HashMap::new()),
+        }
+    }
+
+    /// 把请求发往该主机的共享 HTTP/2 连接；首次访问时建立连接。
+    ///
+    /// 关键点：给「同主机」的多个请求复用同一条 HTTP/2 连接，并真正并行
+    /// 多路复用——锁内只 `clone` 出发送端后立即释放锁，避免串行排队。
+    /// 若发送端已失效（上游断开），移除坏连接并重建后重试一次。
+    async fn send(
+        &self,
+        host: &str,
+        req: Request<Full<Bytes>>,
+    ) -> crate::Result<Response<Incoming>> {
+        // clone 出便宜的多路复用发送端（body 为 Arc<Bytes>，浅拷贝）。
+        // 发送端拿到后锁即释放，允许同主机多个请求在 Y 一条连接上真正并行。
+        let mut sender = self.sender(host).await?;
+        match sender.send_request(req.clone()).await {
+            Ok(res) => Ok(res),
+            Err(_) => {
+                // 连接可能已陈旧/被上游关闭：移除坏连接，重建后重试一次。
+                self.dispose(host).await;
+                let sender = self.sender(host).await?;
+                Ok(sender.send_request(req).await?)
+            }
+        }
+    }
+
+    /// 在锁内取出（或首次建立）该主机的 HTTP/2 发送端后立即释放锁。
+    async fn sender(&self, host: &str) -> crate::Result<SendRequest<Full<Bytes>>> {
+        let mut guard = self.inner.lock().await;
+        if let Some(s) = guard.get(host) {
+            return Ok(s.clone());
+        }
+        let s = establish_http2(host).await?;
+        guard.insert(host.to_string(), s.clone());
+        log::info!("[上游] 已建立 {host} 的共享 HTTP/2 连接");
+        Ok(s)
+    }
+
+    async fn dispose(&self, host: &str) {
+        let mut guard = self.inner.lock().await;
+        guard.remove(host);
+    }
+}
+
+/// 建一条到 host:443 的 HTTP/2 上游连接（TLS 不校验 + ALPN h2）。
+async fn establish_http2(host: &str) -> crate::Result<SendRequest<Full<Bytes>>> {
+    let mut addrs = tokio::net::lookup_host((host, 443)).await?;
+    let ip = addrs
+        .next()
+        .ok_or_else(|| std::io::Error::other("dns no result"))?;
+    let tcp = TcpStream::connect(ip).await?;
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| std::io::Error::other("bad host"))?;
+    let mut cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NullVerifier))
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let tls = connector.connect(server_name, tcp).await?;
+    let (sender, connection) =
+        http2_handshake(TokioExecutor::new(), Box::pin(TokioIo::new(tls))).await?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::debug!("上游 http2 连接结束: {e}");
+        }
+    });
+    Ok(sender)
+}
+
+/// 把客户端的一个 HTTP 请求（已 MITM 解密）转送到共享上游，并回读响应。
+async fn handle_upstream(
+    pool: Arc<UpstreamPool>,
+    host: &str,
+    req: Request<Incoming>,
+) -> crate::Result<Response<Full<Bytes>>> {
+    let (parts, body) = req.into_parts();
+    let body_bytes = body.collect().await?;
+    let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let uri = format!("https://{host}{path}");
+
+    let mut ureq = Request::builder()
+        .method(parts.method.clone())
+        .uri(uri)
+        .version(hyper::Version::HTTP_2)
+        .header(hyper::header::HOST, host)
+        .body(Full::from(body_bytes))?;
+    for (name, value) in &parts.headers {
+        let low = name.as_str().to_ascii_lowercase();
+        let hop = matches!(
+            low.as_str(),
+            "host"
+                | "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "transfer-encoding"
+                | "upgrade"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+        );
+        if hop {
+            continue;
+        }
+        ureq.headers_mut().insert(name.clone(), value.clone());
+    }
+
+    let res = pool.send(host, ureq).await?;
+    let (rparts, rbody) = res.into_parts();
+    let rbytes = rbody.collect().await?;
+    Ok(Response::from_parts(rparts, Full::from(rbytes)))
 }
 
 /// 双向转发两个连接，并累计上传/下载字节到 stats。
