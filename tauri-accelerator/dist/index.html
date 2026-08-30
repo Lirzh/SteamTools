@@ -71,7 +71,7 @@
 
     <div class="card">
       <h2>运行状态</h2>
-      <div class="row"><label>监听端口</label><input id="portInput" value="10666" /></div>
+      <div class="row"><label>监听端口</label><input id="portInput" value="26561" /></div>
       <div class="hint">把系统/应用的 HTTP(S) 代理指向 <b>127.0.0.1:端口</b> 即可生效；勾选的域名会做 HTTPS 解密加速，未勾选域名透明直连。</div>
     </div>
 
@@ -130,7 +130,11 @@
     $('btnToggle').onclick = async () => {
       try {
         if (running) { await invoke('stop_proxy'); log('已停止'); }
-        else { await invoke('start_proxy'); log('已启动，代理地址 127.0.0.1:' + $('portInput').value); }
+        else {
+          await invoke('set_port', { port: Number($('portInput').value) });
+          await invoke('start_proxy');
+          log('已启动，代理地址 127.0.0.1:' + $('portInput').value);
+        }
         await refresh();
       } catch (e) { log('操作失败: ' + e); }
     };

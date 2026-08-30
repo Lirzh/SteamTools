@@ -38,7 +38,7 @@ impl Default for AppConfig {
             "steamusercontent-a.akamaihd.net".into(),
         ];
         AppConfig {
-            port: 10666,
+            port: 26561,
             hosts,
             routes: HashMap::new(),
         }
@@ -151,6 +151,19 @@ fn normalize_host(s: &str) -> String {
     s.split(':').next().unwrap_or(s).trim_end_matches('.').to_lowercase()
 }
 
+/// 设置监听端口并持久化。
+#[tauri::command]
+async fn set_port(
+    state: tauri::State<'_, std::sync::Arc<AppState>>,
+    port: u16,
+) -> CmdResult<()> {
+    let mut cfg = state.config.lock().unwrap();
+    cfg.port = port;
+    let cfg = cfg.clone();
+    save_config(&state.data_dir, &cfg);
+    Ok(())
+}
+
 fn cmd_err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -205,7 +218,8 @@ pub fn run() {
             start_proxy,
             stop_proxy,
             status,
-            set_hosts
+            set_hosts,
+            set_port
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
