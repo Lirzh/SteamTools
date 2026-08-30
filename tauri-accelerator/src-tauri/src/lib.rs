@@ -417,7 +417,11 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                     w.set_focus().ok();
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                // 退出前关闭系统代理，避免残留导致无法上网
+                set_system_proxy(false);
+                app.exit(0);
+            }
             _ => {}
         })
         .build(app)?;
@@ -473,6 +477,14 @@ pub fn run() {
             get_stats,
             connectivity_test
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::Exit => {
+                // 应用退出时兜底关闭系统代理
+                set_system_proxy(false);
+                let _ = app_handle;
+            }
+            _ => {}
+        });
 }
